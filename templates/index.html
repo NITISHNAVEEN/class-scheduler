@@ -1,0 +1,238 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Class Scheduler Max Flow</title>
+    <script src="https://d3js.org/d3.v7.min.js"></script>
+    <style>
+        body { font-family: Arial, sans-serif; background: #f9f9f9; padding: 20px; }
+        .container { max-width: 1000px; margin: auto; background: white; padding: 20px; border-radius: 8px; box-shadow: 0 0 10px rgba(0,0,0,0.1); }
+        input { padding: 8px; width: 100%; margin-bottom: 10px; box-sizing: border-box; }
+        button { padding: 10px 15px; background: #007bff; color: white; border: none; border-radius: 4px; cursor: pointer; }
+        button:hover { background: #0056b3; }
+        button:disabled { background: #ccc; cursor: not-allowed; }
+        #visualization { margin-top: 20px; border: 1px solid #ddd; background: #fafafa; border-radius: 4px; }
+        .node circle { fill: #fff; stroke: #007bff; stroke-width: 2px; }
+        .node text { font-size: 12px; pointer-events: none; text-anchor: middle; dominant-baseline: central; }
+        .link { fill: none; stroke: #aaa; stroke-width: 2px; }
+        .link.active { stroke: #ff4757; stroke-width: 4px; }
+        .link-label { font-size: 10px; font-weight: bold; pointer-events: none; } /* Font size reduced here */
+        #controls { margin-top: 15px; display: none; }
+        #results { margin-top: 20px; background: #eef; padding: 15px; border-radius: 4px; display: none; }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <h2>Class Scheduler using Ford-Fulkerson</h2>
+    <label>Batches (comma separated, e.g., 25, 50, 20, 200):</label>
+    <input type="text" id="batches" value="25, 50, 20, 200">
+
+    <label>Classrooms (comma separated, e.g., 200, 50, 25):</label>
+    <input type="text" id="classrooms" value="200, 50, 25">
+
+    <label>Time Slots (comma separated, e.g., T1, T2):</label>
+    <input type="text" id="timeslots" value="T1, T2">
+
+    <button onclick="generateSchedule()">Build Network & Schedule</button>
+
+    <div id="controls">
+        <button id="prevBtn" onclick="prevStep()">Previous Step</button>
+        <button id="nextBtn" onclick="nextStep()">Next Step</button>
+        <span id="stepCounter" style="margin-left: 15px; font-weight: bold;"></span>
+    </div>
+
+    <svg id="visualization" width="100%" height="400"></svg>
+    
+    <div id="results"></div>
+</div>
+
+<script>
+    let graphData = null;
+    let currentStep = -1;
+
+    async function generateSchedule() {
+        const payload = {
+            batches: document.getElementById('batches').value,
+            classrooms: document.getElementById('classrooms').value,
+            timeslots: document.getElementById('timeslots').value
+        };
+
+        const res = await fetch('/schedule', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload)
+        });
+        graphData = await res.json();
+        
+        currentStep = -1;
+        document.getElementById('controls').style.display = 'block';
+        document.getElementById('results').style.display = 'none';
+        
+        drawGraph();
+        updateUI();
+    }
+
+    function drawGraph() {
+        const svg = d3.select("#visualization");
+        svg.selectAll("*").remove(); 
+        
+        // Define arrowheads for the lines
+        svg.append("defs").selectAll("marker")
+            .data(["arrow", "arrow-active"])
+            .enter().append("marker")
+            .attr("id", d => d)
+            .attr("viewBox", "0 -5 10 10")
+            .attr("refX", 28) // Offset to account for node radius (25px)
+            .attr("refY", 0)
+            .attr("markerWidth", 6)
+            .attr("markerHeight", 6)
+            .attr("orient", "auto")
+            .append("path")
+            .attr("d", "M0,-5L10,0L0,5")
+            .style("fill", d => d === "arrow-active" ? "#ff4757" : "#aaa");
+        
+        const width = document.getElementById("visualization").clientWidth;
+        const height = 400;
+
+        const levelWidth = width / 5;
+        const nodes = graphData.nodes.map(n => ({
+            ...n, 
+            x: (n.level + 0.5) * levelWidth,
+            y: 0 
+        }));
+
+        for (let l = 0; l <= 4; l++) {
+            const levelNodes = nodes.filter(n => n.level === l);
+            const ySpacing = height / (levelNodes.length + 1);
+            levelNodes.forEach((n, i) => { n.y = ySpacing * (i + 1); });
+        }
+
+        const links = graphData.edges.map(e => ({
+            source: nodes.find(n => n.id === e.source),
+            target: nodes.find(n => n.id === e.target),
+            capacity: e.capacity
+        }));
+
+        // Draw Links with default arrowheads
+        svg.selectAll(".link")
+            .data(links)
+            .enter().append("line")
+            .attr("class", "link")
+            .attr("id", d => `link-${d.source.id}-${d.target.id}`)
+            .attr("x1", d => d.source.x)
+            .attr("y1", d => d.source.y)
+            .attr("x2", d => d.target.x)
+            .attr("y2", d => d.target.y)
+            .attr("marker-end", "url(#arrow)");
+
+        // Draw Flow / Capacity Labels at the beginning of the edge (~30% of the way)
+        svg.selectAll(".link-label")
+            .data(links)
+            .enter().append("text")
+            .attr("class", "link-label")
+            .attr("id", d => `label-${d.source.id}-${d.target.id}`)
+            .attr("x", d => d.source.x * 0.7 + d.target.x * 0.3) // 30% from source
+            .attr("y", d => (d.source.y * 0.7 + d.target.y * 0.3) - 8) // 30% from source, slightly raised
+            .style("text-anchor", "middle")
+            .style("fill", "#666")
+            .text(d => `0 / ${d.capacity}`);
+
+        // Draw Nodes
+        const nodeGroup = svg.selectAll(".node")
+            .data(nodes)
+            .enter().append("g")
+            .attr("class", "node")
+            .attr("transform", d => `translate(${d.x},${d.y})`);
+
+        nodeGroup.append("circle").attr("r", 25);
+        nodeGroup.append("text").text(d => d.label);
+    }
+
+    function highlightPath(pathNodes) {
+        // Reset all links to default styling
+        d3.selectAll(".link")
+          .classed("active", false)
+          .attr("marker-end", "url(#arrow)");
+          
+        if (!pathNodes) return;
+        
+        // Apply active styling to the current path
+        for (let i = 0; i < pathNodes.length - 1; i++) {
+            d3.select(`#link-${pathNodes[i]}-${pathNodes[i+1]}`)
+              .classed("active", true)
+              .attr("marker-end", "url(#arrow-active)");
+        }
+    }
+
+    function updateUI() {
+        const totalSteps = graphData.steps.length;
+        document.getElementById("prevBtn").disabled = (currentStep <= -1);
+        document.getElementById("nextBtn").disabled = (currentStep >= totalSteps);
+        
+        const currentFlows = {};
+        graphData.edges.forEach(e => {
+            currentFlows[`${e.source}-${e.target}`] = 0;
+        });
+
+        let activePath = null;
+        for (let i = 0; i <= currentStep; i++) {
+            if (i === totalSteps) break; 
+            const stepData = graphData.steps[i];
+            
+            for (let j = 0; j < stepData.path.length - 1; j++) {
+                const u = stepData.path[j];
+                const v = stepData.path[j+1];
+                
+                if (currentFlows[`${u}-${v}`] !== undefined) {
+                    currentFlows[`${u}-${v}`] += stepData.flow;
+                } else if (currentFlows[`${v}-${u}`] !== undefined) {
+                    currentFlows[`${v}-${u}`] -= stepData.flow;
+                }
+            }
+            if (i === currentStep) activePath = stepData.path;
+        }
+
+        graphData.edges.forEach(e => {
+            const flow = currentFlows[`${e.source}-${e.target}`];
+            d3.select(`#label-${e.source}-${e.target}`)
+              .text(`${flow} / ${e.capacity}`)
+              .style("fill", flow > 0 ? "#d63031" : "#666");
+        });
+
+        if (currentStep === -1) {
+            document.getElementById("stepCounter").innerText = "Network Initialized (No Flow)";
+            highlightPath(null);
+            document.getElementById('results').style.display = 'none';
+        } else if (currentStep < totalSteps) {
+            const stepFlow = graphData.steps[currentStep].flow;
+            document.getElementById("stepCounter").innerText = `Step ${currentStep + 1} of ${totalSteps} (Pushed flow of ${stepFlow} through path)`;
+            highlightPath(activePath);
+            document.getElementById('results').style.display = 'none';
+        } else {
+            document.getElementById("stepCounter").innerText = "Algorithm Complete (Max Flow Reached)";
+            highlightPath(null); 
+            
+            const resDiv = document.getElementById('results');
+            resDiv.style.display = 'block';
+            resDiv.innerHTML = `<h3>Schedule Results (Total Batches Scheduled: ${graphData.max_classes})</h3>`;
+            graphData.schedule.forEach(s => resDiv.innerHTML += `<div>✅ ${s}</div>`);
+        }
+    }
+
+    function nextStep() {
+        if (currentStep < graphData.steps.length) {
+            currentStep++;
+            updateUI();
+        }
+    }
+
+    function prevStep() {
+        if (currentStep > -1) {
+            currentStep--;
+            updateUI();
+        }
+    }
+</script>
+</body>
+</html>
